@@ -1,0 +1,110 @@
+use serde::Deserialize;
+use std::{
+    error::Error,
+    fs::File,
+    io::{BufReader, Write},
+};
+use chrono::{DateTime, SecondsFormat, Utc};
+use quick_xml::Writer;
+use quick_xml::events::{Event, BytesStart, BytesText, BytesEnd, BytesDecl};
+
+#[derive(Debug, Deserialize)]
+struct TimelinePoint {
+    point: String,
+    time: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct Segment {
+    timelinePath: Option<Vec<TimelinePoint>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct Root {
+    semanticSegments: Vec<Segment>,
+}
+
+fn parse_point(s: &str) -> Option<(f64, f64)> {
+    let cleaned = s
+        .replace("Â°", "")
+        .replace("°", "")
+        .replace('°', "")
+        .trim()
+        .to_string();
+    let parts: Vec<&str> = cleaned.split(',').map(|p| p.trim()).collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let lat = parts[0].parse::<f64>().ok()?;
+    let lon = parts[1].parse::<f64>().ok()?;
+    Some((lat, lon))
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let file = File::open("trajets.json")?;
+    let reader = BufReader::new(file);
+    let root: Root = serde_json::from_reader(reader)?;
+
+    let mut writer = Writer::new_with_indent(Vec::new(), b' ', 4);
+
+    // Déclaration XML correcte
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
+
+    // <gpx>
+    let mut gpx = BytesStart::new("gpx");
+    gpx.push_attribute(("version", "1.1"));
+    gpx.push_attribute(("creator", "Rust GPX Exporter"));
+    gpx.push_attribute(("xmlns", "http://www.topografix.com/GPX/1/1"));
+    writer.write_event(Event::Start(gpx))?;
+
+    // <trk>
+    writer.write_event(Event::Start(BytesStart::new("trk")))?;
+
+    // <name>Positions Export</name>
+    writer.write_event(Event::Start(BytesStart::new("name")))?;
+    writer.write_event(Event::Text(BytesText::new("Positions Export")))?;
+    writer.write_event(Event::End(BytesEnd::new("name")))?;
+
+    // <trkseg>
+    writer.write_event(Event::Start(BytesStart::new("trkseg")))?;
+
+    for segment in root.semanticSegments {
+        if let Some(path) = segment.timelinePath {
+            for point in path {
+                if let Some((lat, lon)) = parse_point(&point.point) {
+                    let mut trkpt = BytesStart::new("trkpt");
+                    trkpt.push_attribute(("lat", lat.to_string().as_str()));
+                    trkpt.push_attribute(("lon", lon.to_string().as_str()));
+                    writer.write_event(Event::Start(trkpt))?;
+
+                    if let Some(time_str) = point.time {
+                        if let Ok(dt) = DateTime::parse_from_rfc3339(&time_str) {
+                            let utc = dt.with_timezone(&Utc);
+                            let timestamp = utc.to_rfc3339_opts(SecondsFormat::Secs, true);
+                            writer.write_event(Event::Start(BytesStart::new("time")))?;
+                            writer.write_event(Event::Text(BytesText::new(&timestamp)))?;
+                            writer.write_event(Event::End(BytesEnd::new("time")))?;
+                        }
+                    }
+
+                    writer.write_event(Event::End(BytesEnd::new("trkpt")))?;
+                }
+            }
+        }
+    }
+
+    // Clôture des balises
+    writer.write_event(Event::End(BytesEnd::new("trkseg")))?;
+    writer.write_event(Event::End(BytesEnd::new("trk")))?;
+    writer.write_event(Event::End(BytesEnd::new("gpx")))?;
+
+    let result = writer.into_inner();
+    let mut file = File::create("trajets.gpx")?;
+    file.write_all(&result)?;
+
+    println!("Fichier GPX généré");
+
+    Ok(())
+}
